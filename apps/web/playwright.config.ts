@@ -8,11 +8,17 @@ import { defineConfig, devices } from '@playwright/test'
 // emulation. Not part of the pre-push smoke lane; run `pnpm build:web` first.
 
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url))
+/** A TCP port from the environment, refused unless it is one: it reaches the shell commands below. */
+function portFrom(value: string | undefined, fallback: string): string {
+  const port = value ?? fallback
+  if (!/^\d{1,5}$/.test(port) || Number(port) > 65535) throw new Error(`not a TCP port: ${port}`)
+  return port
+}
 const baseURL = process.env.BASE_URL ?? 'http://127.0.0.1:41760'
 const port = new URL(baseURL).port || '41760'
 // Collaboration lane (TOL-8): a Tolaria server on loopback with a throwaway vault, seeded
 // fresh for every run, reached through the preview server's `/v1` proxy.
-const remotePort = process.env.TOLARIA_E2E_REMOTE_PORT ?? '41761'
+const remotePort = portFrom(process.env.TOLARIA_E2E_REMOTE_PORT, '41761')
 /** The Tolaria server of the run; offline.spec.ts serves the bundle from its own origin in front of it. */
 export const REMOTE_URL = `http://127.0.0.1:${remotePort}`
 const remoteUrl = REMOTE_URL
@@ -20,7 +26,8 @@ const remoteDir = join(tmpdir(), `tolaria-web-collab-e2e-${remotePort}`)
 export const COLLAB_TOKEN = 'e2e-token-not-a-secret-0123456789'
 /** The seeded git remote the server pushes to: what the desktop app pulls. */
 export const REMOTE_GIT_DIR = `${remoteDir}/remote.git`
-const COLLAB_SPEC = /collab\.spec\.ts/
+// Specs that launch their own browsers, so they run once rather than in every device project.
+const COLLAB_SPEC = /(collab|convergence)\.spec\.ts/
 const storageState = {
   cookies: [],
   origins: [
@@ -50,7 +57,8 @@ export default defineConfig({
     { name: 'iphone-15', testIgnore: COLLAB_SPEC, use: { ...devices['iPhone 15'] } },
     { name: 'ipad', testIgnore: COLLAB_SPEC, use: { ...devices['iPad Pro 11'] } },
     { name: 'ipad-landscape', testIgnore: COLLAB_SPEC, use: { ...devices['iPad Pro 11 landscape'] } },
-    // The spec launches Chromium, WebKit and an iPhone itself: they edit one note together.
+    // collab.spec.ts launches Chromium, WebKit and an iPhone itself: they edit one note together.
+    // convergence.spec.ts (TOL-239) times a desktop owner and an iPhone editor on a shared note.
     { name: 'collab', testMatch: COLLAB_SPEC },
   ],
   webServer: [
