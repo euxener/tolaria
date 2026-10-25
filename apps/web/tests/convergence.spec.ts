@@ -3,6 +3,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
 	type Browser,
+	type BrowserContext,
 	chromium,
 	devices,
 	expect,
@@ -61,6 +62,8 @@ interface Seat {
 	page: Page;
 	/** The text of the paragraph this seat types in. */
 	line: string;
+	/** Every marker typed in the run, by either seat: what the note's file must end up holding. */
+	typed: string[];
 }
 
 /**
@@ -166,6 +169,7 @@ async function sample(
 	await watch(from.page, marker);
 	await watch(to.page, marker);
 	await caretToEnd(from);
+	from.typed.push(marker);
 	await from.page.keyboard.type(` ${marker}`);
 	const typed = await seenAt(from.page, marker, timeoutMs);
 	const arrived = await seenAt(to.page, marker, timeoutMs);
@@ -294,34 +298,41 @@ test.afterAll(async () => {
 	for (const browser of browsers) await browser.close();
 });
 
+/** The owner's desktop window and the editor's phone window, both of the same run. */
+async function seatsOf(target: Target, typed: string[]) {
+	const [desktopBrowser, phoneBrowser] = browsers as [Browser, Browser];
+	const windows = [
+		await target.window(desktopBrowser, "owner", devices["Desktop Chrome"]),
+		await target.window(phoneBrowser, "editor", devices["iPhone 15"]),
+	];
+	const [ownerWindow, editorWindow] = windows as [
+		BrowserContext,
+		BrowserContext,
+	];
+	const owner: Seat = {
+		label: "owner (desktop)",
+		page: await ownerWindow.newPage(),
+		line: OWNER_LINE,
+		typed,
+	};
+	const editor: Seat = {
+		label: "editor (iPhone)",
+		page: await editorWindow.newPage(),
+		line: EDITOR_LINE,
+		typed,
+	};
+	return { owner, editor, windows };
+}
+
 async function converge(
 	target: Target,
 	testInfo: TestInfo,
 ): Promise<ConvergenceSummary> {
 	const startedAt = new Date().toISOString();
-	const [desktopBrowser, phoneBrowser] = browsers as [Browser, Browser];
 	const note = await createSharedNote(target, newNote());
+	const typed: string[] = [];
 	try {
-		const ownerWindow = await target.window(
-			desktopBrowser,
-			"owner",
-			devices["Desktop Chrome"],
-		);
-		const editorWindow = await target.window(
-			phoneBrowser,
-			"editor",
-			devices["iPhone 15"],
-		);
-		const owner: Seat = {
-			label: "owner (desktop)",
-			page: await ownerWindow.newPage(),
-			line: OWNER_LINE,
-		};
-		const editor: Seat = {
-			label: "editor (iPhone)",
-			page: await editorWindow.newPage(),
-			line: EDITOR_LINE,
-		};
+		const { owner, editor, windows } = await seatsOf(target, typed);
 		const query = `?note=${encodeURIComponent(note.path)}`;
 		await openNote(owner, `/${query}`, note, target.openMs);
 		await openNote(editor, `${note.editorBase}/${query}`, note, target.openMs);
@@ -337,11 +348,10 @@ async function converge(
 				contentType: "image/png",
 			});
 		}
-		await ownerWindow.close();
-		await editorWindow.close();
+		for (const window of windows) await window.close();
 		return summary;
 	} finally {
-		await removeSharedNote(target, note);
+		await removeSharedNote(target, note, typed);
 	}
 }
 

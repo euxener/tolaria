@@ -296,6 +296,34 @@ async function createNote(
 	expect(created.status(), `creating ${note.path}`).toBe(201);
 }
 
+/** How long the server may take to write the last live edits into the file. */
+const WRITTEN_MS = 60_000;
+
+/**
+ * Until the note's file holds every edit typed into it. The server writes a live document
+ * back when the note is deleted with edits it has not written yet, which would restore it.
+ */
+async function untilWritten(
+	owner: APIRequestContext,
+	path: string,
+	typed: string[],
+): Promise<void> {
+	await expect
+		.poll(
+			async () => {
+				const body = await (
+					await owner.get(`/v1/files/${encodePath(path)}`)
+				).text();
+				return typed.filter((marker) => !body.includes(marker)).length;
+			},
+			{
+				timeout: WRITTEN_MS,
+				message: `${path} holds every edit typed into it`,
+			},
+		)
+		.toBe(0);
+}
+
 async function deleteNote(
 	owner: APIRequestContext,
 	path: string,
@@ -306,6 +334,10 @@ async function deleteNote(
 		headers: { "if-match": read.headers().etag ?? "" },
 	});
 	expect(deleted.status(), `deleting ${path}`).toBe(200);
+	// Nothing written back after the delete: the note stays gone.
+	await new Promise((resolve) => setTimeout(resolve, 1_000));
+	const after = await owner.get(`/v1/files/${encodePath(path)}`);
+	expect(after.status(), `${path} after its deletion`).toBe(404);
 }
 
 /** Shares the note with the editor, as the Share dialog does; the share's id. */
@@ -373,12 +405,17 @@ export async function createSharedNote(
 	}
 }
 
-/** Revokes the share and deletes the note, so a run leaves the vault as it found it. */
+/**
+ * Revokes the share and deletes the note once the server has written every marker `typed`
+ * into it, so a run leaves the vault as it found it.
+ */
 export async function removeSharedNote(
 	target: Target,
 	note: SharedNote,
+	typed: string[],
 ): Promise<void> {
 	const owner = await target.api("owner");
 	await revokeShare(owner, note.shareId);
+	await untilWritten(owner, note.path, typed);
 	await deleteNote(owner, note.path);
 }
