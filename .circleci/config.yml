@@ -762,18 +762,54 @@ jobs:
             
             echo "Container smoke test passed"
 
-  web-gates:
-    executor: browser
-    # Each container builds the bundle and runs one Playwright shard into a blob report;
-    # web-gates-report merges the blobs into one HTML/JUnit report and records the pass marker
-    # (containers in a parallel job cannot, see mark_validated).
-    parallelism: 4
+  web-build:
+    executor: node
+    # Builds apps/web/dist once and hands it to every web-gates container through the workspace
+    # (TOL-241), instead of each container building the same bundle.
     steps:
       - checkout
       - skip_unless_changed:
           scope: web-gates
           ignore: "^(src-tauri/.*\\.rs|docs/(?!web/))"
           paths: "^(apps/|packages/|src/|docs/web/)"
+      - install_frontend_dependencies
+      - run:
+          name: Build web bundle
+          command: pnpm build:web
+      - persist_to_workspace:
+          root: apps/web
+          paths:
+            - dist
+
+  web-server-tests:
+    executor: node
+    # The server tests run beside the Playwright shards rather than on one of them, so the
+    # timing-based split below keeps the containers even.
+    steps:
+      - checkout
+      - skip_unless_changed:
+          scope: web-gates
+          ignore: "^(src-tauri/.*\\.rs|docs/(?!web/))"
+          paths: "^(apps/|packages/|src/|docs/web/)"
+      - install_frontend_dependencies
+      - run:
+          name: Server tests with coverage
+          command: pnpm test:server
+
+  web-gates:
+    executor: browser
+    # Each container runs a timing-balanced set of web spec files (every project) on the bundle
+    # from web-build into a blob report; web-gates-report merges the blobs into one HTML/JUnit
+    # report and records the pass marker (containers in a parallel job cannot, see mark_validated).
+    parallelism: 6
+    steps:
+      - checkout
+      - skip_unless_changed:
+          scope: web-gates
+          ignore: "^(src-tauri/.*\\.rs|docs/(?!web/))"
+          paths: "^(apps/|packages/|src/|docs/web/)"
+      - attach_workspace:
+          at: apps/web
       - install_frontend_dependencies
       - restore_cache:
           keys:
@@ -787,24 +823,32 @@ jobs:
           paths:
             - ~/.cache/ms-playwright
       - run:
-          name: Server tests with coverage (first container)
-          command: |
-            if [[ "${CIRCLE_NODE_INDEX:-0}" == "0" ]]; then
-              pnpm test:server
-            else
-              echo "Server tests run on container 0."
-            fi
-      - run:
-          name: Build web bundle
-          command: pnpm build:web
-      - run:
           name: Web Playwright shard (Chromium, WebKit, iPhone, iPad, collab)
           command: |
             set -euo pipefail
+            test -f apps/web/dist/index.html
+            # Playwright's own --shard splits by test count in project order, which left one
+            # container with most of the WebKit run. Splitting whole spec files by the timings
+            # this job stored last time keeps the containers even; web-gates-report checks that
+            # the shards together ran every listed test.
+            mapfile -t specs < <(
+              cd apps/web/tests &&
+                find . -name '*.spec.ts' | sed 's#^\./##' | sort |
+                circleci tests split --split-by=timings --timings-type=classname --time-default=30s
+            )
+            if [[ "${#specs[@]}" -eq 0 ]]; then
+              echo "No spec files for container ${CIRCLE_NODE_INDEX}" >&2
+              exit 1
+            fi
+            printf 'Container %s specs:\n' "${CIRCLE_NODE_INDEX}"
+            printf '  %s\n' "${specs[@]}"
             shard=$((CIRCLE_NODE_INDEX + 1))
             PLAYWRIGHT_BLOB_OUTPUT_DIR=/tmp/web-blob-reports \
             PLAYWRIGHT_BLOB_OUTPUT_NAME="report-${shard}.zip" \
-              pnpm playwright:web --shard="${shard}/${CIRCLE_NODE_TOTAL}" --reporter=dot,blob
+            PLAYWRIGHT_JUNIT_OUTPUT_FILE=/tmp/web-junit/results.xml \
+              pnpm playwright:web --reporter=dot,blob,junit "${specs[@]/#/apps/web/tests/}"
+      - store_test_results:
+          path: /tmp/web-junit
       - persist_to_workspace:
           root: /tmp/web-blob-reports
           paths:
@@ -834,11 +878,22 @@ jobs:
             PLAYWRIGHT_JUNIT_OUTPUT_FILE=test-results/web-junit/results.xml \
               pnpm exec playwright merge-reports --config apps/web/playwright.config.ts \
                 --reporter=html,junit /tmp/web-blob-reports
-      - store_test_results:
-          path: test-results/web-junit
+      - run:
+          name: Check the shards ran every web test once
+          command: |
+            set -euo pipefail
+            listed="$(pnpm exec playwright test --config apps/web/playwright.config.ts --list |
+              sed -n 's/^Total: \([0-9]*\) tests\{0,1\} in .*/\1/p')"
+            merged="$(grep -o '<testsuites [^>]*' test-results/web-junit/results.xml |
+              sed -n 's/.* tests="\([0-9]*\)".*/\1/p')"
+            echo "Listed ${listed:-?} tests; the merged shard report has ${merged:-?}."
+            [[ -n "$listed" && "$listed" == "$merged" ]]
       - store_artifacts:
           path: test-results/web-report
           destination: web-playwright-report
+      - store_artifacts:
+          path: test-results/web-junit
+          destination: web-playwright-junit
       - mark_validated:
           scope: web-gates
 
@@ -1818,7 +1873,21 @@ workflows:
               ignore: gh-pages
             tags:
               ignore: /.*/
+      - web-build:
+          filters:
+            branches:
+              ignore: gh-pages
+            tags:
+              ignore: /.*/
+      - web-server-tests:
+          filters:
+            branches:
+              ignore: gh-pages
+            tags:
+              ignore: /.*/
       - web-gates:
+          requires:
+            - web-build
           filters:
             branches:
               ignore: gh-pages
@@ -1827,6 +1896,7 @@ workflows:
       - web-gates-report:
           requires:
             - web-gates
+            - web-server-tests
           filters:
             branches:
               ignore: gh-pages
