@@ -15,7 +15,9 @@ import {
 
 const gitOptions = { env: gitTestEnvironment(), stdio: "pipe" };
 const standalone = process.argv.includes("--standalone");
-const bundleId = standalone ? "com.tolaria.mobile.dev" : "host.exp.Exponent";
+const bundleId =
+	process.env.TOLARIA_QA_BUNDLE_ID ??
+	(standalone ? "com.tolaria.mobile.dev" : "host.exp.Exponent");
 const fileCount = Number(process.env.TOLARIA_GIT_QA_FILES ?? 2);
 const historyMiB = Number(process.env.TOLARIA_GIT_QA_HISTORY_MIB ?? 0);
 if (!Number.isInteger(fileCount) || fileCount < 2 || fileCount > 10_000) {
