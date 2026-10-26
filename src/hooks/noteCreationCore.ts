@@ -47,7 +47,7 @@ import type {
 	NoteContentParams,
 	TypeInstanceDefault,
 } from "./noteCreationDefaults";
-import { buildNoteBody } from "./noteCreationDefaults";
+import { buildNoteBody, isStatusKey } from "./noteCreationDefaults";
 
 function hasOuterWhitespace(value: string): boolean {
 	return value.trim() !== value;
@@ -274,9 +274,14 @@ export function applyTypeDefaults({
 
 	const relationships = { ...entry.relationships };
 	const properties = { ...entry.properties };
+	let status = entry.status;
 	for (const defaultValue of defaults) {
 		if (defaultValue.kind === "relationship") {
 			relationships[defaultValue.key] = relationshipRefs(defaultValue.value);
+			continue;
+		}
+		if (isStatusKey(defaultValue.key)) {
+			status = String(defaultValue.value);
 			continue;
 		}
 		properties[defaultValue.key] = defaultValue.value as
@@ -286,7 +291,7 @@ export function applyTypeDefaults({
 	}
 
 	return {
-		entry: { ...entry, relationships, properties },
+		entry: { ...entry, relationships, properties, status },
 		content,
 	};
 }

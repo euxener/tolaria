@@ -77,6 +77,24 @@ function collectRelationshipDefaults(
 	);
 }
 
+export function isStatusKey(key: string): boolean {
+	return canonicalFrontmatterKey(key) === "status";
+}
+
+/** Status is semantic on every entry, so read its current value from `status`
+ *  and only borrow the author's key spelling from the Type's properties. */
+function collectStatusDefault(typeEntry: VaultEntry): TypeInstanceDefault[] {
+	const status = typeEntry.status;
+	if (
+		!status ||
+		!isTypeInstanceDefault("status", status, canonicalFrontmatterKey)
+	)
+		return [];
+	const key =
+		Object.keys(typeEntry.properties ?? {}).find(isStatusKey) ?? "status";
+	return [{ key, value: status, kind: "property" }];
+}
+
 function appendUniqueDefault(
 	defaults: TypeInstanceDefault[],
 	seenKeys: Set<string>,
@@ -98,6 +116,7 @@ export function resolveTypeInstanceDefaults(
 	const defaults: TypeInstanceDefault[] = [];
 	const seenKeys = new Set<string>();
 	const candidateDefaults = [
+		...collectStatusDefault(typeEntry),
 		...collectPropertyDefaults(typeEntry),
 		...collectRelationshipDefaults(typeEntry),
 	];
