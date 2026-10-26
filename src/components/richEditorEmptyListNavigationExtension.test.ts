@@ -1,8 +1,12 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createRichEditorEmptyListNavigationExtension } from './richEditorEmptyListNavigationExtension'
+import {
+  collapsedSectionHiddenBlockIds,
+  toggleCollapsedHeading,
+} from './tolariaCollapsedSections'
 
 type KeyListener = (event: KeyboardEvent) => void
-type NavigationKey = 'ArrowDown' | 'ArrowUp' | 'Backspace'
+type NavigationKey = 'ArrowDown' | 'ArrowUp' | 'Backspace' | 'Enter'
 
 function keyboardEvent(key: NavigationKey, options: Partial<KeyboardEvent> = {}) {
   return {
@@ -10,7 +14,7 @@ function keyboardEvent(key: NavigationKey, options: Partial<KeyboardEvent> = {})
     ctrlKey: false,
     isComposing: false,
     key,
-    keyCode: key === 'ArrowDown' ? 40 : key === 'ArrowUp' ? 38 : 8,
+    keyCode: key === 'ArrowDown' ? 40 : key === 'ArrowUp' ? 38 : key === 'Enter' ? 13 : 8,
     metaKey: false,
     preventDefault: vi.fn(),
     shiftKey: false,
@@ -103,6 +107,58 @@ describe('createRichEditorEmptyListNavigationExtension', () => {
     expect(createFixture().fire('ArrowDown', { shiftKey: true }).preventDefault).not.toHaveBeenCalled()
     expect(createFixture().fire('ArrowDown', { isComposing: true }).preventDefault).not.toHaveBeenCalled()
     expect(createFixture({ editable: false }).fire('ArrowDown').preventDefault).not.toHaveBeenCalled()
+  })
+
+  it('inserts after the outer collapsed section when Enter is at a collapsed heading end', () => {
+    let keydownListener: KeyListener | null = null
+    const heading = { content: [{ text: 'Inner', type: 'text' }], id: 'inner', props: { level: 2 }, type: 'heading' }
+    const sectionEnd = { content: [{ text: 'Hidden', type: 'text' }], id: 'body', type: 'paragraph' }
+    const next = { content: [], id: 'next', props: { level: 1 }, type: 'heading' }
+    const paragraph = { content: [], id: 'inserted', type: 'paragraph' }
+    const view = {
+      composing: false,
+      endOfTextblock: vi.fn(() => true),
+      state: { selection: { empty: true, $head: { parentOffset: 5, parent: { content: { size: 5 } } } } },
+    }
+    const editor = {
+      _tiptapEditor: { view },
+      document: [
+        { content: [{ text: 'Outer', type: 'text' }], id: 'outer', props: { level: 1 }, type: 'heading' },
+        heading,
+        sectionEnd,
+        next,
+      ],
+      getTextCursorPosition: vi.fn(() => ({ block: heading })),
+      insertBlocks: vi.fn((blocks: Array<{ type: 'paragraph' }>, referenceId: string) => {
+        const referenceIndex = editor.document.findIndex((block) => block.id === referenceId)
+        editor.document.splice(referenceIndex + 1, 0, paragraph)
+        return blocks.map(() => paragraph)
+      }),
+      isEditable: true,
+      onChange: vi.fn(() => vi.fn()),
+      prosemirrorView: view,
+      setTextCursorPosition: vi.fn(),
+    }
+    const editorElement = document.createElement('div')
+    toggleCollapsedHeading(editor as never, 'outer', editorElement)
+    toggleCollapsedHeading(editor as never, 'inner', editorElement)
+    const extension = createRichEditorEmptyListNavigationExtension()({ editor: editor as never })
+    extension.mount?.({
+      dom: { addEventListener: vi.fn((_type: string, listener: KeyListener) => { keydownListener = listener }) } as never,
+      root: document,
+      signal: new AbortController().signal,
+    })
+
+    const event = keyboardEvent('Enter')
+    keydownListener?.(event)
+    expect(editor.insertBlocks).toHaveBeenCalledWith([{ type: 'paragraph' }], 'body', 'after')
+    expect(editor.setTextCursorPosition).toHaveBeenCalledWith(paragraph, 'start')
+    expect(event.preventDefault).toHaveBeenCalled()
+    const hiddenBlockIds = collapsedSectionHiddenBlockIds(editor as never)
+    expect(hiddenBlockIds).toContain(sectionEnd.id)
+    expect(hiddenBlockIds).not.toContain(paragraph.id)
+    toggleCollapsedHeading(editor as never, 'outer', editorElement)
+    toggleCollapsedHeading(editor as never, 'inner', editorElement)
   })
 
   it('promotes linked children when deleting an empty paragraph nested under a list', () => {

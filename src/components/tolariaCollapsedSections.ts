@@ -21,6 +21,7 @@ type CollapsedHeadingStore = {
   emit: () => void
   getSnapshot: () => number
   listeners: Set<() => void>
+  visibleBlockIds: Set<string>
   subscribe: (listener: () => void) => () => void
   version: number
 }
@@ -71,6 +72,7 @@ function createCollapsedHeadingStore(): CollapsedHeadingStore {
     },
     getSnapshot: () => store.version,
     listeners: new Set(),
+    visibleBlockIds: new Set(),
     subscribe: (listener) => {
       store.listeners.add(listener)
       return () => store.listeners.delete(listener)
@@ -95,6 +97,10 @@ export function useCollapsedHeadingIds(editor: TolariaBlockNoteEditor) {
   const store = collapsedHeadingStore(editor)
   useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
   return store.collapsedHeadingIds
+}
+
+export function getCollapsedHeadingIds(editor: TolariaBlockNoteEditor): ReadonlySet<string> {
+  return collapsedHeadingStore(editor).collapsedHeadingIds
 }
 
 export function blockHeadingLevel(block: CollapsibleBlock | undefined): number | null {
@@ -192,12 +198,14 @@ function startCollapsedSection(
 function collapsedSectionRenderStateFromItems(
   items: readonly CollapsedSectionItem[],
   collapsedHeadingIds: ReadonlySet<string>,
+  visibleBlockIds: ReadonlySet<string>,
 ): CollapsedSectionRenderState {
   const state = emptyCollapsedSectionRenderState()
   let activeCollapsedLevel: number | null = null
 
   for (const item of items) {
     activeCollapsedLevel = openCollapsedSectionLevel(activeCollapsedLevel, item.headingLevel)
+    if (item.blockId && visibleBlockIds.has(item.blockId)) continue
     if (hideBlockInsideCollapsedSection(state, activeCollapsedLevel, item.blockId)) continue
     activeCollapsedLevel = startCollapsedSection(state, item, collapsedHeadingIds)
   }
@@ -208,10 +216,12 @@ function collapsedSectionRenderStateFromItems(
 function collapsedSectionRenderState(
   blocks: readonly CollapsibleBlock[],
   collapsedHeadingIds: ReadonlySet<string>,
+  visibleBlockIds: ReadonlySet<string>,
 ): CollapsedSectionRenderState {
   return collapsedSectionRenderStateFromItems(
     flattenBlocks(blocks).map(collapsedSectionItemFromBlock),
     collapsedHeadingIds,
+    visibleBlockIds,
   )
 }
 
@@ -422,10 +432,12 @@ function isClosingHeading(headingLevel: number | null, activeCollapsedLevel: num
 function collapsedSectionRenderStateFromElements(
   elements: readonly HTMLElement[],
   collapsedHeadingIds: ReadonlySet<string>,
+  visibleBlockIds: ReadonlySet<string>,
 ): CollapsedSectionRenderState {
   return collapsedSectionRenderStateFromItems(
     elements.map(collapsedSectionItemFromElement),
     collapsedHeadingIds,
+    visibleBlockIds,
   )
 }
 
@@ -448,14 +460,15 @@ function applyCollapsedSectionRenderingToElement(
   editorElement: HTMLElement,
   collapsedHeadingIds: ReadonlySet<string>,
   fallbackBlocks: readonly CollapsibleBlock[],
+  visibleBlockIds: ReadonlySet<string>,
 ) {
   const blockElements = renderedSectionBlockElements(editorElement)
   const renderState = mergeCollapsedSectionRenderStates(
     fallbackBlocks.length > 0
-      ? collapsedSectionRenderState(fallbackBlocks, collapsedHeadingIds)
+      ? collapsedSectionRenderState(fallbackBlocks, collapsedHeadingIds, visibleBlockIds)
       : emptyCollapsedSectionRenderState(),
     blockElements.length > 0
-      ? collapsedSectionRenderStateFromElements(blockElements, collapsedHeadingIds)
+      ? collapsedSectionRenderStateFromElements(blockElements, collapsedHeadingIds, visibleBlockIds)
       : emptyCollapsedSectionRenderState(),
   )
 
@@ -466,8 +479,9 @@ function applyCollapsedSectionRenderingFromHeadingIds(
   editorElement: HTMLElement,
   collapsedHeadingIds: ReadonlySet<string>,
   fallbackBlocks: readonly CollapsibleBlock[] = [],
+  visibleBlockIds: ReadonlySet<string> = new Set(),
 ) {
-  applyCollapsedSectionRenderingToElement(editorElement, collapsedHeadingIds, fallbackBlocks)
+  applyCollapsedSectionRenderingToElement(editorElement, collapsedHeadingIds, fallbackBlocks, visibleBlockIds)
 }
 
 function applyCollapsedSectionRendering(
@@ -481,6 +495,7 @@ function applyCollapsedSectionRendering(
     editorElement,
     collapsedHeadingIds,
     editor.document as readonly CollapsibleBlock[],
+    collapsedHeadingStore(editor).visibleBlockIds,
   )
 }
 
@@ -491,16 +506,16 @@ export function collapsedSectionHiddenBlockIds(editor: TolariaBlockNoteEditor): 
   const fallbackBlocks = editor.document as readonly CollapsibleBlock[]
   const editorElement = editorBlockElement(editor)
   if (!editorElement) {
-    return collapsedSectionRenderState(fallbackBlocks, store.collapsedHeadingIds).hiddenBlockIds
+    return collapsedSectionRenderState(fallbackBlocks, store.collapsedHeadingIds, store.visibleBlockIds).hiddenBlockIds
   }
 
   const blockElements = renderedSectionBlockElements(editorElement)
   return mergeCollapsedSectionRenderStates(
     fallbackBlocks.length > 0
-      ? collapsedSectionRenderState(fallbackBlocks, store.collapsedHeadingIds)
+      ? collapsedSectionRenderState(fallbackBlocks, store.collapsedHeadingIds, store.visibleBlockIds)
       : emptyCollapsedSectionRenderState(),
     blockElements.length > 0
-      ? collapsedSectionRenderStateFromElements(blockElements, store.collapsedHeadingIds)
+      ? collapsedSectionRenderStateFromElements(blockElements, store.collapsedHeadingIds, store.visibleBlockIds)
       : emptyCollapsedSectionRenderState(),
   ).hiddenBlockIds
 }
@@ -641,7 +656,12 @@ function expandCollapsedHeading(
   if (!collapsedHeadingIds.delete(headingId)) return
 
   store.collapsedHeadingIds = collapsedHeadingIds
-  applyCollapsedSectionRenderingFromHeadingIds(editorElement, store.collapsedHeadingIds, fallbackBlocks)
+  applyCollapsedSectionRenderingFromHeadingIds(
+    editorElement,
+    store.collapsedHeadingIds,
+    fallbackBlocks,
+    store.visibleBlockIds,
+  )
   store.emit()
 }
 
@@ -660,6 +680,7 @@ function ensureCollapsedHeadingRenderer(
     editorElement,
     store.collapsedHeadingIds,
     editor.document as readonly CollapsibleBlock[],
+    store.visibleBlockIds,
   ); }
   const scheduleApply = () => {
     if (frame !== null) return
@@ -791,7 +812,14 @@ function applyCollapsedHeadingToggleRendering(options: {
     editorElement,
     store.collapsedHeadingIds,
     editor.document as readonly CollapsibleBlock[],
+    store.visibleBlockIds,
   )
+}
+
+export function keepBlockVisibleOutsideCollapsedSection(editor: TolariaBlockNoteEditor, blockId: string) {
+  const store = collapsedHeadingStore(editor)
+  store.visibleBlockIds.add(blockId)
+  applyCollapsedSectionRendering(editor, store.collapsedHeadingIds)
 }
 
 function releaseAttachedCollapsedHeadingRenderer(controller: CollapsedHeadingRenderingController) {

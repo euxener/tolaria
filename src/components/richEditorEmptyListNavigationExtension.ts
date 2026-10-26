@@ -6,6 +6,10 @@ import {
   isComposingKeyboardEvent,
   type RichEditorView,
 } from './richEditorKeyboard'
+import {
+  getCollapsedHeadingIds,
+  keepBlockVisibleOutsideCollapsedSection,
+} from './tolariaCollapsedSections'
 
 const EMPTY_LIST_TYPES = new Set([
   'bulletListItem',
@@ -22,7 +26,12 @@ type BlockLike = {
   children?: BlockLike[]
   content?: unknown
   id?: string
+  props?: Record<string, unknown>
   type: string
+}
+type CollapsedEnterEditor = EmptyListNavigationEditor & {
+  document: BlockLike[]
+  insertBlocks: (blocks: Array<{ type: 'paragraph' }>, referenceId: string, placement: 'after') => BlockLike[]
 }
 type Navigation = {
   adjacentBlock: (position: CursorPosition) => BlockLike | null | undefined
@@ -164,13 +173,78 @@ function handleArrowKey(
   consumeKeyboardEvent(event)
 }
 
+function headingLevel(block: BlockLike | undefined): number {
+  const value = block?.props?.level
+  return typeof value === 'number' ? value : Number.parseInt(String(value ?? 1), 10)
+}
+
+function isHeading(block: BlockLike, level: number) {
+  return block.type === 'heading' && headingLevel(block) <= level
+}
+
+function headingSectionEndIndex(document: readonly BlockLike[], headingIndex: number) {
+  const level = headingLevel(document.at(headingIndex))
+  const boundary = document.findIndex((block, index) => index > headingIndex && isHeading(block, level))
+  return boundary < 0 ? document.length : boundary
+}
+
+function collapsedSectionOwnerIndex(
+  document: readonly BlockLike[],
+  targetIndex: number,
+  collapsedIds: ReadonlySet<string>,
+) {
+  for (let index = 0; index < targetIndex; index += 1) {
+    const candidate = document.at(index)
+    if (candidate?.type !== 'heading' || !candidate.id || !collapsedIds.has(candidate.id)) continue
+    if (targetIndex < headingSectionEndIndex(document, index)) return index
+  }
+  return targetIndex
+}
+
+function collapsedSectionEnd(document: readonly BlockLike[], headingId: string, collapsedIds: ReadonlySet<string>) {
+  const targetIndex = document.findIndex((block) => block.id === headingId && block.type === 'heading')
+  if (targetIndex < 0 || !collapsedIds.has(headingId)) return null
+
+  const ownerIndex = collapsedSectionOwnerIndex(document, targetIndex, collapsedIds)
+  const endIndex = headingSectionEndIndex(document, ownerIndex)
+  return document.at(endIndex - 1) ?? document.at(ownerIndex)
+}
+
+function isEligibleCollapsedEnter(event: ArrowEvent, editor: CollapsedEnterEditor, view: RichEditorView) {
+  return event.key === 'Enter' && !hasModifier(event) && editor.isEditable !== false
+    && !isComposingKeyboardEvent(event, view) && isAtTextblockEnd(view)
+}
+
+function isAtTextblockEnd(view: RichEditorView) {
+  const { selection } = view.state
+  return selection.empty && selection.$head.parentOffset === selection.$head.parent.content.size
+}
+
+function insertAfterCollapsedSection(event: ArrowEvent, editor: CollapsedEnterEditor, view: RichEditorView): boolean {
+  if (!isEligibleCollapsedEnter(event, editor, view)) return false
+
+  const { block } = editor.getTextCursorPosition()
+  if (block.type !== 'heading' || !block.id) return false
+  const sectionEnd = collapsedSectionEnd(editor.document, block.id, getCollapsedHeadingIds(editor as never))
+  if (!sectionEnd?.id) return false
+
+  const [paragraph] = editor.insertBlocks([{ type: 'paragraph' }], sectionEnd.id, 'after')
+  if (!paragraph?.id) return false
+  keepBlockVisibleOutsideCollapsedSection(editor as never, paragraph.id)
+  editor.setTextCursorPosition(paragraph, 'start')
+  consumeKeyboardEvent(event)
+  return true
+}
+
 export const createRichEditorEmptyListNavigationExtension = createExtension(({ editor }) => {
   const richEditor = editor as EmptyListNavigationEditor
+  const collapsedEnterEditor = editor as CollapsedEnterEditor
 
   return {
     key: 'richEditorEmptyListNavigation',
     mount: createCaptureKeydownMount(richEditor, (event, view) => {
       if (!view || promoteNestedEmptyParagraph(event, richEditor, view)) return
+      if (insertAfterCollapsedSection(event, collapsedEnterEditor, view)) return
       handleArrowKey(event, richEditor, view)
     }),
   } as const
