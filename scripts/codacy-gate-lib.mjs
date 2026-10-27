@@ -78,3 +78,72 @@ function resolveDiagnosticPath(path, repositoryRoot) {
   if (!path) return ''
   return path.startsWith('/') ? path : `${repositoryRoot}/${path}`
 }
+
+function unquote(value) {
+  const quote = value.charAt(0)
+  if (quote === '"' || quote === "'") {
+    const close = value.indexOf(quote, 1)
+    return close === -1 ? value.slice(1) : value.slice(1, close)
+  }
+  const comment = value.indexOf(' #')
+  return comment === -1 ? value : value.slice(0, comment).trim()
+}
+
+/** Reads `exclude_paths` from the root .codacy.yaml, the same list Codacy's hosted analysis skips. */
+export function codacyExcludePatterns(yamlText) {
+  const patterns = []
+  let inExcludes = false
+  for (const line of yamlText.split('\n')) {
+    const trimmed = line.trim()
+    if (trimmed === '' || trimmed.startsWith('#')) continue
+    if (!line.startsWith(' ') && !line.startsWith('\t') && !line.startsWith('-')) {
+      inExcludes = trimmed === 'exclude_paths:'
+      continue
+    }
+    if (inExcludes && trimmed.startsWith('- ')) patterns.push(unquote(trimmed.slice(2).trim()))
+  }
+  return patterns
+}
+
+function matchesSegment(pattern, name) {
+  const parts = pattern.split('*')
+  if (parts.length === 1) return pattern === name
+  const head = parts.shift()
+  const tail = parts.pop()
+  if (!name.startsWith(head) || !name.endsWith(tail) || name.length < head.length + tail.length) return false
+  let cursor = head.length
+  const end = name.length - tail.length
+  for (const part of parts) {
+    const found = name.indexOf(part, cursor)
+    if (found === -1 || found + part.length > end) return false
+    cursor = found + part.length
+  }
+  return true
+}
+
+function matchesSegments(patternSegments, pathSegments) {
+  if (patternSegments.length === 0) return pathSegments.length === 0
+  const [first, ...rest] = patternSegments
+  if (first === '**') {
+    for (let skip = 0; skip <= pathSegments.length; skip += 1) {
+      if (matchesSegments(rest, pathSegments.slice(skip))) return true
+    }
+    return false
+  }
+  return pathSegments.length > 0 && matchesSegment(first, pathSegments[0]) && matchesSegments(rest, pathSegments.slice(1))
+}
+
+/** Codacy-style glob match on a repository-relative path: `**` spans directories, `*` stays inside one. */
+export function matchesCodacyGlob(glob, relativePath) {
+  return matchesSegments(glob.split('/'), relativePath.split('/'))
+}
+
+/** Drops files matching the Codacy exclude list so the local gate agrees with hosted Codacy. */
+export function withoutExcludedPaths(additions, patterns, repositoryRoot) {
+  const kept = new Map()
+  for (const [file, lines] of additions) {
+    const relative = file.startsWith(`${repositoryRoot}/`) ? file.slice(repositoryRoot.length + 1) : file
+    if (!patterns.some((pattern) => matchesCodacyGlob(pattern, relative))) kept.set(file, lines)
+  }
+  return kept
+}

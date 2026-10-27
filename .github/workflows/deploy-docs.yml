@@ -7,6 +7,7 @@ on:
       - ".github/workflows/deploy-docs.yml"
       - "package.json"
       - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
       - "scripts/build-agent-docs.mjs"
       - "scripts/assemble-pages-site.sh"
       - "scripts/build-release-download-page.ts"
@@ -62,9 +63,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          pnpm --filter @tolaria/landing build:tolaria-md
           pnpm docs:build
-
           bash scripts/assemble-pages-site.sh site/.vitepress/dist
+          cp -R site/landing/dist/. site/.vitepress/dist/
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v4
